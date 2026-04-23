@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# EasyOCR model cache
+.EasyOCR/
+
+# Output files
+*.xlsx
+*.csv
+
+# Logs
+*.log
+
+# Claude Code internal
+.claude/
+
+# Local portal-specific config (not committed)
+secrets_local.py
+
+# Local debug / exploratory scripts and notes
+debug_ids.py
+inspect_popup.py
+test_captcha*.py
+SCRAPING_CHALLENGES.txt
+NEXT_ACTIONS.md
+
+# OS
+.DS_Store
+Thumbs.db

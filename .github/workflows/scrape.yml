@@ -1,0 +1,139 @@
+name: scrape
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: "Comma-separated shard indices to run (0-59). Empty = all 60."
+        required: false
+        default: ""
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - id: build
+        shell: bash
+        run: |
+          if [ -z "${{ github.event.inputs.shards }}" ]; then
+            values=$(python -c "import json; print(json.dumps(list(range(60))))")
+          else
+            values=$(python -c "import json,sys; print(json.dumps([int(x) for x in '${{ github.event.inputs.shards }}'.split(',') if x.strip()]))")
+          fi
+          echo "matrix=$values" >> "$GITHUB_OUTPUT"
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      DOC_TARGET_URL: ${{ secrets.DOC_TARGET_URL }}
+      DOC_ID_PREFIX: ${{ secrets.DOC_ID_PREFIX }}
+      DOC_ID_ZERO_PADDING: ${{ secrets.DOC_ID_ZERO_PADDING }}
+      DOC_ID_FIELD_SELECTOR: ${{ secrets.DOC_ID_FIELD_SELECTOR }}
+      DOC_CAPTCHA_FIELD_SELECTOR: ${{ secrets.DOC_CAPTCHA_FIELD_SELECTOR }}
+      DOC_SUBMIT_BUTTON_SELECTOR: ${{ secrets.DOC_SUBMIT_BUTTON_SELECTOR }}
+      DOC_CAPTCHA_IMG_XPATH: ${{ secrets.DOC_CAPTCHA_IMG_XPATH }}
+      DOC_CAPTCHA_WRONG_MARKER: ${{ secrets.DOC_CAPTCHA_WRONG_MARKER }}
+      DOC_CAPTCHA_ERROR_CLASS: ${{ secrets.DOC_CAPTCHA_ERROR_CLASS }}
+      DOC_RED_MESSAGE_SELECTOR: ${{ secrets.DOC_RED_MESSAGE_SELECTOR }}
+      DOC_PDF_URL_MARKER: ${{ secrets.DOC_PDF_URL_MARKER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Compute shard ID range
+        id: range
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          RANGE_START: ${{ secrets.DOC_ID_START }}
+          RANGE_END: ${{ secrets.DOC_ID_END }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import math, os
+          id_start = int(os.environ["RANGE_START"])
+          id_end = int(os.environ["RANGE_END"])
+          shards = 60
+          shard = int(os.environ["SHARD"])
+          size = math.ceil((id_end - id_start + 1) / shards)
+          start = id_start + shard * size
+          end = min(start + size - 1, id_end)
+          print(f"start={start}")
+          print(f"end={end}")
+          PY
+
+      - name: Download prior shard output (if any)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: shard-${{ matrix.shard }}
+          path: .
+
+      - name: Run scraper for this shard
+        env:
+          DOC_ID_START: ${{ steps.range.outputs.start }}
+          DOC_ID_END: ${{ steps.range.outputs.end }}
+          DOC_OUTPUT_PATH: doc_data_shard_${{ matrix.shard }}.xlsx
+          DOC_NUM_WORKERS: "2"
+          PYTHONUNBUFFERED: "1"
+        run: python main.py
+
+      - name: Upload shard output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: doc_data_shard_${{ matrix.shard }}.xlsx
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: warn
+
+  merge:
+    needs: scrape
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install openpyxl
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge shards
+        run: python scripts/merge_shards.py --shards-dir shards --output doc_data.xlsx
+
+      - name: Upload merged workbook
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc_data
+          path: doc_data.xlsx
+          retention-days: 90
+          overwrite: true

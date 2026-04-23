@@ -1,0 +1,5 @@
+ddddocr
+playwright
+pillow
+openpyxl
+pdfplumber
