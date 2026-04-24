@@ -52,7 +52,7 @@ class CaptchaSolver:
 
     def _capture(self, page: Page) -> Optional[bytes]:
         try:
-            page.wait_for_selector(self._config.captcha_xpath, timeout=self._config.expected_length * 2000)
+            page.wait_for_selector(self._config.captcha_xpath, timeout=self._config.wait_timeout_ms)
             return page.locator(self._config.captcha_xpath).screenshot()
         except Exception:
             logger.exception("Failed to capture captcha image.")

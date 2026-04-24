@@ -157,7 +157,10 @@ def _parse_pdf_record(pdf_bytes: bytes, query_id: str) -> DocRecord:
         text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
 
     logger.debug("PDF text for %s:\n%s", query_id, text[:800])
+    return _parse_text_record(text, query_id)
 
+
+def _parse_text_record(text: str, query_id: str) -> DocRecord:
     f: dict[str, str] = {}
     for key, pattern in _PDF_PATTERNS.items():
         m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)

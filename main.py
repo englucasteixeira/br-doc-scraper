@@ -8,7 +8,14 @@ try:
 except ImportError:
     pass
 
-from config import ScraperConfig, StorageConfig
+from config import (
+    CaptchaConfig,
+    ConfigError,
+    FormConfig,
+    ScraperConfig,
+    StorageConfig,
+    validate_configs,
+)
 from src.doc_scraper import DocScraper
 
 logging.basicConfig(
@@ -36,9 +43,22 @@ def _storage_config_from_env() -> StorageConfig:
 
 
 if __name__ == "__main__":
+    scraper_config = _scraper_config_from_env()
+    storage_config = _storage_config_from_env()
+    captcha_config = CaptchaConfig()
+    form_config = FormConfig()
+
+    try:
+        validate_configs(scraper_config, captcha_config, form_config)
+    except ConfigError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        sys.exit(2)
+
     num_workers = int(os.environ.get("DOC_NUM_WORKERS", "2"))
     DocScraper.run_parallel(
         num_workers=num_workers,
-        scraper_config=_scraper_config_from_env(),
-        storage_config=_storage_config_from_env(),
+        scraper_config=scraper_config,
+        captcha_config=captcha_config,
+        form_config=form_config,
+        storage_config=storage_config,
     )

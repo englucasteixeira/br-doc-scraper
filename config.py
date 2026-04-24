@@ -4,6 +4,10 @@ import os
 from dataclasses import dataclass, field
 
 
+class ConfigError(RuntimeError):
+    """Raised when required portal configuration is missing or invalid."""
+
+
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
@@ -38,6 +42,7 @@ class CaptchaConfig:
     crop_ratio: float = 0.55
     expected_length: int = 5
     max_attempts: int = 5
+    wait_timeout_ms: int = 10_000
     captcha_xpath: str = field(default_factory=lambda: _env("DOC_CAPTCHA_IMG_XPATH", ""))
 
 
@@ -79,3 +84,40 @@ class StorageConfig:
     output_path: str = "doc_data.xlsx"
     sheet_name: str = "Records"
     error_sheet_name: str = "Errors"
+
+
+_REQUIRED_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("ScraperConfig", "target_url", "DOC_TARGET_URL"),
+    ("ScraperConfig", "id_prefix", "DOC_ID_PREFIX"),
+    ("CaptchaConfig", "captcha_xpath", "DOC_CAPTCHA_IMG_XPATH"),
+    ("FormConfig", "id_field_selector", "DOC_ID_FIELD_SELECTOR"),
+    ("FormConfig", "captcha_field_selector", "DOC_CAPTCHA_FIELD_SELECTOR"),
+    ("FormConfig", "submit_button_selector", "DOC_SUBMIT_BUTTON_SELECTOR"),
+    ("FormConfig", "captcha_wrong_marker", "DOC_CAPTCHA_WRONG_MARKER"),
+    ("FormConfig", "captcha_error_class", "DOC_CAPTCHA_ERROR_CLASS"),
+    ("FormConfig", "red_message_selector", "DOC_RED_MESSAGE_SELECTOR"),
+    ("FormConfig", "pdf_url_marker", "DOC_PDF_URL_MARKER"),
+)
+
+
+def validate_configs(
+    scraper: ScraperConfig,
+    captcha: CaptchaConfig,
+    form: FormConfig,
+) -> None:
+    """Fail fast if any required portal config is empty.
+
+    Catches missing GitHub Secrets / env vars at startup instead of hours
+    later as an obscure Playwright timeout.
+    """
+    sources = {"ScraperConfig": scraper, "CaptchaConfig": captcha, "FormConfig": form}
+    missing: list[str] = []
+    for cls_name, attr, env_key in _REQUIRED_FIELDS:
+        value = getattr(sources[cls_name], attr)
+        if not value:
+            missing.append(env_key)
+    if missing:
+        raise ConfigError(
+            "Missing required portal configuration. Set the following env vars "
+            "(or populate secrets_local.py): " + ", ".join(missing)
+        )
