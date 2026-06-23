@@ -30,6 +30,7 @@ def test_parses_all_fields_from_well_formed_text():
     assert record.audience == "Geral"
     assert record.owner == "12.345.678/0001-99 - Empresa Exemplo LTDA"
     assert record.operator == "João da Silva"
+    assert record.area == "250 m2"
     assert record.status == "VALID"
 
 
@@ -60,6 +61,7 @@ def test_missing_fields_remain_none_without_crashing():
     assert record.owner is None
     assert record.entity_name is None
     assert record.entity_id is None
+    assert record.area is None
 
 
 def test_accepts_em_dash_as_separator_in_owner():

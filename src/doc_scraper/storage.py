@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import openpyxl
 from openpyxl.styles import Font
@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 _HEADERS = [
     "Query ID", "Doc Number", "Entity Name", "Entity ID",
     "Address", "District", "City", "Validity", "Status",
-    "Category", "Audience", "Owner", "Operator",
+    "Category", "Audience", "Owner", "Operator", "Area",
 ]
 
 
-_ERROR_HEADERS = ["Query ID", "Error"]
+_ERROR_HEADERS = ["Query ID", "Error", "Category"]
 
 
 class SpreadsheetWriter:
@@ -50,7 +50,7 @@ class SpreadsheetWriter:
 
     def append_error(self, record: ErrorRecord) -> None:
         with self._lock:
-            self._error_sheet.append([record.query_id, record.error_message])
+            self._error_sheet.append(record.to_row())
             self._workbook.save(self._path)
             logger.debug("Error record '%s' written to '%s'.", record.query_id, self._path)
 
@@ -58,16 +58,33 @@ class SpreadsheetWriter:
         for record in records:
             self.append(record)
 
+    def update_area(self, query_id: str, area: Optional[str]) -> bool:
+        with self._lock:
+            header = {cell.value: idx for idx, cell in enumerate(self._sheet[1], start=1) if cell.value}
+            id_col = header.get("Query ID")
+            area_col = header.get("Area")
+            if id_col is None or area_col is None:
+                return False
+            for row in self._sheet.iter_rows(min_row=2):
+                cell = row[id_col - 1]
+                if cell.value is not None and str(cell.value) == query_id:
+                    row[area_col - 1].value = area
+                    self._workbook.save(self._path)
+                    return True
+            return False
+
     def _load_or_create(self):
         if self._path.exists():
             workbook = openpyxl.load_workbook(self._path)
             sheet = workbook[self._config.sheet_name] if self._config.sheet_name in workbook.sheetnames else workbook.active
+            self._ensure_headers_present(sheet, _HEADERS)
             if self._config.error_sheet_name in workbook.sheetnames:
                 error_sheet = workbook[self._config.error_sheet_name]
+                self._ensure_headers_present(error_sheet, _ERROR_HEADERS)
             else:
                 error_sheet = workbook.create_sheet(self._config.error_sheet_name)
                 self._write_error_header(error_sheet)
-                workbook.save(self._path)
+            workbook.save(self._path)
         else:
             workbook = openpyxl.Workbook()
             sheet = workbook.active
@@ -77,6 +94,17 @@ class SpreadsheetWriter:
             self._write_error_header(error_sheet)
             workbook.save(self._path)
         return workbook, sheet, error_sheet
+
+    @staticmethod
+    def _ensure_headers_present(sheet, headers: List[str]) -> None:
+        existing = {cell.value for cell in sheet[1] if cell.value}
+        next_col = sheet.max_column + 1 if existing else 1
+        for header in headers:
+            if header in existing:
+                continue
+            cell = sheet.cell(row=1, column=next_col, value=header)
+            cell.font = Font(bold=True)
+            next_col += 1
 
     @staticmethod
     def _write_header(sheet) -> None:

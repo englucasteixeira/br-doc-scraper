@@ -10,9 +10,12 @@ from typing import Iterator, Optional
 from config import BrowserConfig, CaptchaConfig, FormConfig, RateLimitConfig, ScraperConfig, StorageConfig
 from .browser import BrowserManager
 from .captcha import CaptchaSolver
+from .errors import ErrorCategory
 from .form import CaptchaRejectedError, FormSubmitter
-from .models import ErrorRecord
+from .models import DocRecord, ErrorRecord
 from .storage import SpreadsheetWriter
+
+REPLACED_MAX_RETRIES = 3
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,72 @@ class DocScraper:
         logger.info("Parallel scraping complete.")
 
     def _process_id(self, browser: BrowserManager, solver: CaptchaSolver, query_id: str) -> None:
+        current_id = query_id
+        any_result = False
+        for replaced_attempt in range(REPLACED_MAX_RETRIES + 1):
+            record = self.scrape_one(browser, solver, current_id)
+            if record is None:
+                break
+            any_result = True
+
+            if isinstance(record, DocRecord):
+                self._writer.append(record)
+                logger.info("[%s] Scraped successfully.", current_id)
+                break
+
+            if isinstance(record, ErrorRecord):
+                if record.category == ErrorCategory.NOT_FOUND_800501:
+                    logger.info("[%s] Not found (800501), skipping.", current_id)
+                    break
+                if record.category == ErrorCategory.REPLACED:
+                    if replaced_attempt >= REPLACED_MAX_RETRIES:
+                        exhausted = ErrorRecord(
+                            query_id=current_id,
+                            error_message="REPLACED retry exhausted: " + record.error_message,
+                            category=ErrorCategory.REPLACED,
+                        )
+                        self._writer.append_error(exhausted)
+                        logger.info("[%s] REPLACED retry exhausted.", current_id)
+                        break
+                    next_id = self._increment_tail(current_id)
+                    if next_id is None:
+                        exhausted = ErrorRecord(
+                            query_id=current_id,
+                            error_message="REPLACED retry exhausted (tail overflow): " + record.error_message,
+                            category=ErrorCategory.REPLACED,
+                        )
+                        self._writer.append_error(exhausted)
+                        logger.info("[%s] REPLACED tail overflow.", current_id)
+                        break
+                    logger.info("[%s] REPLACED — retrying with %s.", current_id, next_id)
+                    current_id = next_id
+                    continue
+                self._writer.append_error(record)
+                logger.info("[%s] Error recorded (%s): %s", current_id, record.category.value, record.error_message)
+                break
+
+        if any_result:
+            time.sleep(random.uniform(self._rate_config.inter_id_delay_min, self._rate_config.inter_id_delay_max))
+
+    def _increment_tail(self, query_id: str) -> Optional[str]:
+        prefix = self._config.id_prefix
+        padding = self._config.id_zero_padding
+        if not query_id.startswith(prefix):
+            return None
+        tail = query_id[len(prefix):]
+        try:
+            num = int(tail)
+        except ValueError:
+            return None
+        return f"{prefix}{str(num + 1).zfill(padding)}"
+
+    def scrape_one(
+        self,
+        browser: BrowserManager,
+        solver: CaptchaSolver,
+        query_id: str,
+    ) -> Optional[DocRecord | ErrorRecord]:
+        """Run the captcha+submit pipeline with retries; return the parsed record without persisting."""
         for attempt in range(1, self._captcha_config.max_attempts + 1):
 
             if attempt > 1:
@@ -112,8 +181,9 @@ class DocScraper:
                 )
                 time.sleep(max(0.0, backoff + jitter))
 
-            page = browser.new_page()
+            page = None
             try:
+                page = browser.new_page()
                 response = page.goto(self._config.target_url)
                 if response is not None and response.status in (429, 503):
                     throttle = random.uniform(self._rate_config.throttle_min, self._rate_config.throttle_max)
@@ -136,30 +206,26 @@ class DocScraper:
                         query_id, captcha_text, attempt, self._captcha_config.max_attempts,
                     )
                     continue
-                finally:
-                    page.close()
 
-                if isinstance(record, ErrorRecord):
-                    self._writer.append_error(record)
-                    logger.info("[%s] Error recorded: %s", query_id, record.error_message)
-                    time.sleep(random.uniform(self._rate_config.inter_id_delay_min, self._rate_config.inter_id_delay_max))
-                    return
                 if record is not None:
-                    self._writer.append(record)
-                    logger.info("[%s] Scraped successfully.", query_id)
-                    time.sleep(random.uniform(self._rate_config.inter_id_delay_min, self._rate_config.inter_id_delay_max))
-                    return
+                    return record
 
                 logger.warning("[%s] Form submission attempt %d/%d failed.", query_id, attempt, self._captcha_config.max_attempts)
                 continue
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Unexpected error on attempt %d/%d (%s), retrying.",
+                    query_id, attempt, self._captcha_config.max_attempts, exc,
+                )
+                continue
             finally:
-                # Guard: close page if not already closed by the inner try/finally.
                 try:
                     page.close()
                 except Exception:
                     pass
 
         logger.error("[%s] Exhausted all attempts, skipping.", query_id)
+        return None
 
     def _id_range(self) -> Iterator[str]:
         padding = self._config.id_zero_padding

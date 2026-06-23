@@ -37,6 +37,17 @@ PORTAL = {
 
     # Network marker that identifies the result PDF URL.
     "DOC_PDF_URL_MARKER": "downloadEndpoint",
+
+    # Server error category markers — substring match (case-insensitive, no
+    # accent normalization) against the red-banner text. Order of evaluation in
+    # classify_error mirrors the post-submit diagnostic flowchart.
+    # NOTE: pick substrings that survive the portal's actual spelling. The MG
+    # AVCB portal, for example, returns the typo "susbtituido" (unaccented), so
+    # the marker "tituido" matches both that and the correct form.
+    "DOC_ERROR_EXPIRED_MARKER": "vencido",
+    "DOC_ERROR_REPLACED_MARKER": "tituido",
+    "DOC_ERROR_NOT_FOUND_MARKER": "(800501)",
+    "DOC_ERROR_INVALID_MARKER": "[201705]",
 }
 
 for _k, _v in PORTAL.items():

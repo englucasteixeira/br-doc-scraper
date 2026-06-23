@@ -9,6 +9,7 @@ import pdfplumber
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from config import FormConfig, ScraperConfig
+from .errors import ErrorCategory
 from .models import DocRecord, ErrorRecord
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ _PDF_PATTERNS: dict[str, str] = {
     "field_audience":   r"P[úu]blico[:\s]+(.+?)(?=\s*Propriet|\n)",
     "field_owner":      r"Propriet[áa]rio[:\s]+(.+?)(?=\s*Respons|\n)",
     "field_operator":   r"Respons[áa]vel pelo Uso[:\s]+(.+?)(?=[ÁA]rea|\n\n|\Z)",
+    "field_area":       r"[ÁA]rea[^\n:]*:\s*(\d[\d.,]*\s*m[²2]?)",
 }
 
 
@@ -55,8 +57,9 @@ class FormSubmitter:
                     raise CaptchaRejectedError("Server rejected the captcha.")
                 red_msg = self._extract_red_message(page)
                 if red_msg:
-                    logger.info("[%s] Server message: %s", query_id, red_msg)
-                    return ErrorRecord(query_id=query_id, error_message=red_msg)
+                    category = classify_error(red_msg, self._form)
+                    logger.info("[%s] Server message (%s): %s", query_id, category.value, red_msg)
+                    return ErrorRecord(query_id=query_id, error_message=red_msg, category=category)
                 return None
 
             return _parse_pdf_record(pdf_bytes, query_id)
@@ -152,6 +155,20 @@ class FormSubmitter:
         return False
 
 
+def classify_error(message: str, form_cfg: FormConfig) -> ErrorCategory:
+    haystack = (message or "").lower()
+    checks = (
+        (form_cfg.expired_marker, ErrorCategory.EXPIRED),
+        (form_cfg.replaced_marker, ErrorCategory.REPLACED),
+        (form_cfg.not_found_marker, ErrorCategory.NOT_FOUND_800501),
+        (form_cfg.invalid_marker, ErrorCategory.INVALID_201705),
+    )
+    for marker, category in checks:
+        if marker and marker.lower() in haystack:
+            return category
+    return ErrorCategory.UNKNOWN
+
+
 def _parse_pdf_record(pdf_bytes: bytes, query_id: str) -> DocRecord:
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         text = "\n".join(pg.extract_text() or "" for pg in pdf.pages)
@@ -184,5 +201,6 @@ def _parse_text_record(text: str, query_id: str) -> DocRecord:
         audience=f.get("field_audience"),
         owner=f.get("field_owner"),
         operator=f.get("field_operator"),
+        area=f.get("field_area"),
         raw_fields=f,
     )

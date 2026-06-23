@@ -77,6 +77,10 @@ class FormConfig:
     captcha_error_class: str = field(default_factory=lambda: _env("DOC_CAPTCHA_ERROR_CLASS", ""))
     red_message_selector: str = field(default_factory=lambda: _env("DOC_RED_MESSAGE_SELECTOR", ""))
     pdf_url_marker: str = field(default_factory=lambda: _env("DOC_PDF_URL_MARKER", ""))
+    expired_marker: str = field(default_factory=lambda: _env("DOC_ERROR_EXPIRED_MARKER", ""))
+    replaced_marker: str = field(default_factory=lambda: _env("DOC_ERROR_REPLACED_MARKER", ""))
+    not_found_marker: str = field(default_factory=lambda: _env("DOC_ERROR_NOT_FOUND_MARKER", ""))
+    invalid_marker: str = field(default_factory=lambda: _env("DOC_ERROR_INVALID_MARKER", ""))
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,10 @@ _REQUIRED_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("FormConfig", "captcha_error_class", "DOC_CAPTCHA_ERROR_CLASS"),
     ("FormConfig", "red_message_selector", "DOC_RED_MESSAGE_SELECTOR"),
     ("FormConfig", "pdf_url_marker", "DOC_PDF_URL_MARKER"),
+    ("FormConfig", "expired_marker", "DOC_ERROR_EXPIRED_MARKER"),
+    ("FormConfig", "replaced_marker", "DOC_ERROR_REPLACED_MARKER"),
+    ("FormConfig", "not_found_marker", "DOC_ERROR_NOT_FOUND_MARKER"),
+    ("FormConfig", "invalid_marker", "DOC_ERROR_INVALID_MARKER"),
 )
 
 

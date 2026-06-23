@@ -34,8 +34,8 @@ def _copy_rows(source_sheet, target_sheet, seen_ids: set[str]) -> int:
     return added
 
 
-def merge(shards_dir: Path, output_path: Path, main_sheet: str = "Records", error_sheet: str = "Errors") -> None:
-    shard_files = sorted(glob.glob(str(shards_dir / "doc_data_shard_*.xlsx")))
+def merge(shards_dir: Path, output_path: Path, main_sheet: str = "Records", error_sheet: str = "Errors", pattern: str = "doc_data_shard_*.xlsx") -> None:
+    shard_files = sorted(glob.glob(str(shards_dir / pattern)))
     if not shard_files:
         raise SystemExit(f"No shard files found in {shards_dir}")
 
@@ -85,5 +85,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shards-dir", type=Path, default=Path("."))
     parser.add_argument("--output", type=Path, default=Path("doc_data.xlsx"))
+    parser.add_argument("--pattern", default="doc_data_shard_*.xlsx")
     args = parser.parse_args()
-    merge(args.shards_dir, args.output)
+    merge(args.shards_dir, args.output, pattern=args.pattern)

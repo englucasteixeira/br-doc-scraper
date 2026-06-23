@@ -27,10 +27,23 @@ Python web scraping project that queries a public document lookup portal, solves
 
 The `DOC_CAPTCHA_ERROR_CLASS` CSS class is checked as fallback captcha-error signal.
 
+### Error-message classification
+
+When the red banner is present, `classify_error` (in `form.py`) categorizes the message by substring match (case-insensitive) against four configurable markers, in this order:
+
+| Category | Marker env var | Orchestrator action |
+|---|---|---|
+| `EXPIRED` | `DOC_ERROR_EXPIRED_MARKER` (e.g. "vencido") | Write to Errors sheet, next ID |
+| `REPLACED` | `DOC_ERROR_REPLACED_MARKER` (e.g. "substituído") | Increment last digit, retry (max 3) |
+| `NOT_FOUND_800501` | `DOC_ERROR_NOT_FOUND_MARKER` (e.g. "(800501)") | Log only, no record |
+| `INVALID_201705` | `DOC_ERROR_INVALID_MARKER` (e.g. "[201705]") | Write to Errors sheet, next ID |
+| `UNKNOWN` | — | Write to Errors sheet (fallback) |
+
 ## ID Range and Filtering Rule
 
 - Range configured by `DOC_ID_START` / `DOC_ID_END` / `DOC_ID_PREFIX` / `DOC_ID_ZERO_PADDING`.
 - **Only IDs whose numeric part ends in `1` have records.** The `_id_range` generator skips all others (`num % 10 != 1`), reducing total queries by ~90%.
+- **Exception**: when the server returns a `REPLACED` error, `_process_id` increments the last digit and retries (tails 2, 3, 4). These retries are scoped to a single logical query and never re-enter `_id_range`.
 
 ## Architecture
 

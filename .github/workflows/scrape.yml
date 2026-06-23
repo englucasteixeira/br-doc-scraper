@@ -1,12 +1,23 @@
 name: scrape
 
 on:
+  # Saturday 17:30 BRT (UTC-3, no DST) = Saturday 20:30 UTC.
+  schedule:
+    - cron: '30 20 * * 6'
   workflow_dispatch:
     inputs:
+      years:
+        description: "Comma-separated years (e.g. 2022,2023). Empty = all years in year_ranges.json."
+        required: false
+        default: ""
       shards:
         description: "Comma-separated shard indices to run (0-59). Empty = all 60."
         required: false
         default: ""
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
 
 jobs:
   plan:
@@ -14,15 +25,36 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+
       - id: build
         shell: bash
+        env:
+          YEARS_FILTER: ${{ github.event.inputs.years }}
+          SHARDS_FILTER: ${{ github.event.inputs.shards }}
         run: |
-          if [ -z "${{ github.event.inputs.shards }}" ]; then
-            values=$(python -c "import json; print(json.dumps(list(range(60))))")
-          else
-            values=$(python -c "import json,sys; print(json.dumps([int(x) for x in '${{ github.event.inputs.shards }}'.split(',') if x.strip()]))")
-          fi
-          echo "matrix=$values" >> "$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, math, os
+          ranges = json.load(open("year_ranges.json"))
+          years_filter = os.environ.get("YEARS_FILTER", "").strip()
+          shards_filter = os.environ.get("SHARDS_FILTER", "").strip()
+          allowed_years = set(y.strip() for y in years_filter.split(",") if y.strip()) if years_filter else set(ranges)
+          shard_ids = [int(x) for x in shards_filter.split(",") if x.strip()] if shards_filter else list(range(60))
+          SHARDS_PER_YEAR = 60
+          matrix = []
+          for year, rng in sorted(ranges.items(), key=lambda kv: int(kv[0])):
+              if year not in allowed_years:
+                  continue
+              lo, hi = rng
+              size = math.ceil((hi - lo + 1) / SHARDS_PER_YEAR)
+              for s in shard_ids:
+                  start = lo + s * size
+                  end = min(start + size - 1, hi)
+                  if start > hi:
+                      continue
+                  matrix.append({"year": year, "shard": s, "start": start, "end": end})
+          print(f"matrix={json.dumps(matrix)}")
+          PY
 
   scrape:
     needs: plan
@@ -32,10 +64,9 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       DOC_TARGET_URL: ${{ secrets.DOC_TARGET_URL }}
-      DOC_ID_PREFIX: ${{ secrets.DOC_ID_PREFIX }}
       DOC_ID_ZERO_PADDING: ${{ secrets.DOC_ID_ZERO_PADDING }}
       DOC_ID_FIELD_SELECTOR: ${{ secrets.DOC_ID_FIELD_SELECTOR }}
       DOC_CAPTCHA_FIELD_SELECTOR: ${{ secrets.DOC_CAPTCHA_FIELD_SELECTOR }}
@@ -45,6 +76,10 @@ jobs:
       DOC_CAPTCHA_ERROR_CLASS: ${{ secrets.DOC_CAPTCHA_ERROR_CLASS }}
       DOC_RED_MESSAGE_SELECTOR: ${{ secrets.DOC_RED_MESSAGE_SELECTOR }}
       DOC_PDF_URL_MARKER: ${{ secrets.DOC_PDF_URL_MARKER }}
+      DOC_ERROR_EXPIRED_MARKER: ${{ secrets.DOC_ERROR_EXPIRED_MARKER }}
+      DOC_ERROR_REPLACED_MARKER: ${{ secrets.DOC_ERROR_REPLACED_MARKER }}
+      DOC_ERROR_NOT_FOUND_MARKER: ${{ secrets.DOC_ERROR_NOT_FOUND_MARKER }}
+      DOC_ERROR_INVALID_MARKER: ${{ secrets.DOC_ERROR_INVALID_MARKER }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,39 +94,19 @@ jobs:
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
 
-      - name: Compute shard ID range
-        id: range
-        shell: bash
-        env:
-          SHARD: ${{ matrix.shard }}
-          RANGE_START: ${{ secrets.DOC_ID_START }}
-          RANGE_END: ${{ secrets.DOC_ID_END }}
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import math, os
-          id_start = int(os.environ["RANGE_START"])
-          id_end = int(os.environ["RANGE_END"])
-          shards = 60
-          shard = int(os.environ["SHARD"])
-          size = math.ceil((id_end - id_start + 1) / shards)
-          start = id_start + shard * size
-          end = min(start + size - 1, id_end)
-          print(f"start={start}")
-          print(f"end={end}")
-          PY
-
       - name: Download prior shard output (if any)
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: shard-${{ matrix.shard }}
+          name: shard-${{ matrix.year }}-${{ matrix.shard }}
           path: .
 
       - name: Run scraper for this shard
         env:
-          DOC_ID_START: ${{ steps.range.outputs.start }}
-          DOC_ID_END: ${{ steps.range.outputs.end }}
-          DOC_OUTPUT_PATH: doc_data_shard_${{ matrix.shard }}.xlsx
+          DOC_ID_PREFIX: PRJ${{ matrix.year }}
+          DOC_ID_START: ${{ matrix.start }}
+          DOC_ID_END: ${{ matrix.end }}
+          DOC_OUTPUT_PATH: doc_data_${{ matrix.year }}_shard_${{ matrix.shard }}.xlsx
           DOC_NUM_WORKERS: "2"
           PYTHONUNBUFFERED: "1"
         run: python main.py
@@ -100,8 +115,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shard-${{ matrix.shard }}
-          path: doc_data_shard_${{ matrix.shard }}.xlsx
+          name: shard-${{ matrix.year }}-${{ matrix.shard }}
+          path: doc_data_${{ matrix.year }}_shard_${{ matrix.shard }}.xlsx
           retention-days: 90
           overwrite: true
           if-no-files-found: warn
@@ -127,13 +142,24 @@ jobs:
           path: shards
           merge-multiple: true
 
-      - name: Merge shards
-        run: python scripts/merge_shards.py --shards-dir shards --output doc_data.xlsx
+      - name: Merge shards per year
+        shell: bash
+        run: |
+          for year in $(python -c "import json; print(' '.join(sorted(json.load(open('year_ranges.json')))))"); do
+            count=$(ls shards/doc_data_${year}_shard_*.xlsx 2>/dev/null | wc -l)
+            if [ "$count" -gt 0 ]; then
+              python scripts/merge_shards.py \
+                --shards-dir shards \
+                --pattern "doc_data_${year}_shard_*.xlsx" \
+                --output doc_data_${year}.xlsx
+            fi
+          done
 
-      - name: Upload merged workbook
+      - name: Upload merged workbooks
         uses: actions/upload-artifact@v4
         with:
-          name: doc_data
-          path: doc_data.xlsx
+          name: doc_data_all_years
+          path: doc_data_*.xlsx
           retention-days: 90
           overwrite: true
+          if-no-files-found: warn
