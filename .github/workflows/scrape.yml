@@ -1,9 +1,7 @@
 name: scrape
 
 on:
-  # Saturday 17:30 BRT (UTC-3, no DST) = Saturday 20:30 UTC.
-  schedule:
-    - cron: '30 20 * * 6'
+  # Manual only — no schedule.
   workflow_dispatch:
     inputs:
       years:
@@ -34,25 +32,37 @@ jobs:
           SHARDS_FILTER: ${{ github.event.inputs.shards }}
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, math, os
+          import json, math, os, sys
+          MAX_MATRIX = 256  # hard GitHub Actions limit per job
           ranges = json.load(open("year_ranges.json"))
           years_filter = os.environ.get("YEARS_FILTER", "").strip()
           shards_filter = os.environ.get("SHARDS_FILTER", "").strip()
-          allowed_years = set(y.strip() for y in years_filter.split(",") if y.strip()) if years_filter else set(ranges)
-          shard_ids = [int(x) for x in shards_filter.split(",") if x.strip()] if shards_filter else list(range(60))
-          SHARDS_PER_YEAR = 60
+          allowed_years = [y for y in sorted(ranges, key=int)
+                           if not years_filter or y in {p.strip() for p in years_filter.split(",") if p.strip()}]
+          if not allowed_years:
+              sys.exit(f"No year in year_ranges.json matches years input {years_filter!r}")
+          # 60 shards/year is the target; shrink it so years * shards stays within the limit.
+          shards_per_year = min(60, MAX_MATRIX // len(allowed_years))
+          if shards_per_year < 1:
+              sys.exit(f"{len(allowed_years)} years cannot fit in {MAX_MATRIX} configurations; pass fewer years.")
+          shard_ids = ([int(x) for x in shards_filter.split(",") if x.strip()]
+                       if shards_filter else list(range(shards_per_year)))
+          bad = [s for s in shard_ids if not 0 <= s < shards_per_year]
+          if bad:
+              sys.exit(f"shards {bad} out of range: this run has {shards_per_year} shards/year (0-{shards_per_year - 1}).")
           matrix = []
-          for year, rng in sorted(ranges.items(), key=lambda kv: int(kv[0])):
-              if year not in allowed_years:
-                  continue
-              lo, hi = rng
-              size = math.ceil((hi - lo + 1) / SHARDS_PER_YEAR)
+          for year in allowed_years:
+              lo, hi = ranges[year]
+              size = math.ceil((hi - lo + 1) / shards_per_year)
               for s in shard_ids:
                   start = lo + s * size
                   end = min(start + size - 1, hi)
                   if start > hi:
                       continue
                   matrix.append({"year": year, "shard": s, "start": start, "end": end})
+          if len(matrix) > MAX_MATRIX:
+              sys.exit(f"matrix has {len(matrix)} configurations, over the {MAX_MATRIX} limit.")
+          print(f"shards_per_year={shards_per_year}", file=sys.stderr)
           print(f"matrix={json.dumps(matrix)}")
           PY
 
@@ -137,6 +147,7 @@ jobs:
 
       - name: Download all shard artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           pattern: shard-*
           path: shards
@@ -145,6 +156,10 @@ jobs:
       - name: Merge shards per year
         shell: bash
         run: |
+          if [ -z "$(ls -A shards 2>/dev/null)" ]; then
+            echo "::warning::No shard artifacts to merge — skipping."
+            exit 0
+          fi
           for year in $(python -c "import json; print(' '.join(sorted(json.load(open('year_ranges.json')))))"); do
             count=$(ls shards/doc_data_${year}_shard_*.xlsx 2>/dev/null | wc -l)
             if [ "$count" -gt 0 ]; then
