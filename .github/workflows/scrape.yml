@@ -77,7 +77,9 @@ jobs:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       DOC_TARGET_URL: ${{ secrets.DOC_TARGET_URL }}
-      DOC_ID_ZERO_PADDING: ${{ secrets.DOC_ID_ZERO_PADDING }}
+      # Not a secret: as a secret its value ("7") is masked everywhere in the
+      # logs, redacting every digit 7 in IDs, error codes and timestamps.
+      DOC_ID_ZERO_PADDING: ${{ vars.DOC_ID_ZERO_PADDING || '7' }}
       DOC_ID_FIELD_SELECTOR: ${{ secrets.DOC_ID_FIELD_SELECTOR }}
       DOC_CAPTCHA_FIELD_SELECTOR: ${{ secrets.DOC_CAPTCHA_FIELD_SELECTOR }}
       DOC_SUBMIT_BUTTON_SELECTOR: ${{ secrets.DOC_SUBMIT_BUTTON_SELECTOR }}
