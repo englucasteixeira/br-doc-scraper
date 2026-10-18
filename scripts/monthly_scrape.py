@@ -115,6 +115,10 @@ def years_to_extend(today: date) -> list[int]:
     return [today.year - 1, today.year]
 
 
+class AmbiguousProbe(Exception):
+    """A probe exhausted its attempts; the range search cannot be trusted."""
+
+
 def extend_year(
     probe: ProbeFn,
     current: Optional[YearState],
@@ -122,7 +126,30 @@ def extend_year(
     max_tail: int = 1_000_000,
     gap_tolerance: int = 5,
 ) -> Optional[YearState]:
-    """Grow a known range upwards, or discover a new year from scratch."""
+    """Grow a known range upwards, or discover a new year from scratch.
+
+    An ambiguous probe (None) aborts the search and keeps the known range: counting it
+    as "exists" would push `high` past the real end, up to max_tail if the portal drops.
+    """
+
+    def strict(tail: int) -> Optional[bool]:
+        result = probe(tail)
+        if result is None:
+            raise AmbiguousProbe(tail)
+        return result
+
+    try:
+        return _extend_year(
+            strict, current, max_tail=max_tail, gap_tolerance=gap_tolerance
+        )
+    except AmbiguousProbe as exc:
+        logger.warning("Ambiguous probe at tail %s; range kept as it was.", exc)
+        return current
+
+
+def _extend_year(
+    probe: ProbeFn, current: Optional[YearState], *, max_tail: int, gap_tolerance: int
+) -> Optional[YearState]:
     if current is None:
         found = find_range(
             probe, max_tail=max_tail, gap_tolerance=gap_tolerance, start_tail=11
@@ -138,12 +165,18 @@ def extend_year(
     return replace(current, high=high)
 
 
-def advance_done_through(
-    year: YearState, failed_ids: list[str], prefix: str
-) -> YearState:
-    """`done_through` stops right before the smallest failed ID of this year."""
-    tails = [int(qid[len(prefix) :]) for qid in failed_ids if qid.startswith(prefix)]
-    done = min(tails) - 1 if tails else year.high
+def advance_done_through(year: YearState, stats: RunStats, prefix: str) -> YearState:
+    """`done_through` moves to the last ID known to exist, and never past a failed ID.
+
+    Not-found IDs above the last existing one stay pending, so numbers issued later (or
+    a `high` that overshot the real end) are queried again next month."""
+
+    def tails(ids: list[str]) -> list[int]:
+        return [int(qid[len(prefix) :]) for qid in ids if qid.startswith(prefix)]
+
+    limit = min(tails(stats.failed), default=year.high + 1) - 1
+    existing = [tail for tail in tails(stats.existing) if tail <= limit]
+    done = max(existing, default=year.done_through)
     return replace(year, done_through=max(year.done_through, done))
 
 
@@ -184,8 +217,13 @@ def select_revisions(
                 for row in rows if index else ():
                     doc = row[index["Doc Number"]]
                     validity = _parse_validity(row[index["Validity"]])
-                    if doc and validity is not None and today <= validity <= until:
+                    if not doc:
+                        continue
+                    # Files are read in name order, so a later revision overrides.
+                    if validity is not None and today <= validity <= until:
                         due[str(doc).strip()] = validity
+                    else:
+                        due.pop(str(doc).strip(), None)
             if "Errors" in workbook.sheetnames:
                 rows = workbook["Errors"].iter_rows(values_only=True)
                 index = _header_index(next(rows, ()), ("Query ID", "Category"))
@@ -343,7 +381,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             **common,
         )
         total.merge(stats)
-        state[year] = advance_done_through(year_state, stats.failed, prefix)
+        state[year] = advance_done_through(year_state, stats, prefix)
         save_state(args.state, state)
 
     # 4. Re-check documents about to expire.

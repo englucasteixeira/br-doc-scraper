@@ -22,11 +22,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RunStats:
-    """Outcome counts of a run. `failed` holds query IDs that exhausted every attempt."""
+    """Outcome counts of a run. `failed` holds query IDs that exhausted every attempt;
+    `existing` holds query IDs known to exist (answered with a record or an error other
+    than not-found, or already in the output and skipped)."""
     records: int = 0
     errors: int = 0
     not_found: int = 0
     failed: list[str] = field(default_factory=list)
+    existing: list[str] = field(default_factory=list)
 
     @property
     def answered(self) -> int:
@@ -37,6 +40,7 @@ class RunStats:
         self.errors += other.errors
         self.not_found += other.not_found
         self.failed.extend(other.failed)
+        self.existing.extend(other.existing)
 
 
 class DocScraper:
@@ -80,6 +84,7 @@ class DocScraper:
             solver = CaptchaSolver(self._captcha_config)
             for query_id in self._id_range():
                 if query_id in already_scraped:
+                    self.stats.existing.append(query_id)
                     continue
                 self._current_id = query_id
                 self._process_id(browser, solver, query_id)
@@ -178,6 +183,10 @@ class DocScraper:
                 self.stats.failed.append(query_id)
                 break
             any_result = True
+            if current_id == query_id and not (
+                isinstance(record, ErrorRecord) and record.category == ErrorCategory.NOT_FOUND_800501
+            ):
+                self.stats.existing.append(query_id)
 
             if isinstance(record, DocRecord):
                 self._writer.append(record)

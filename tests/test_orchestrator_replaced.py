@@ -144,6 +144,7 @@ def test_stats_count_each_outcome():
         scraper._process_id(None, None, qid)
     assert (scraper.stats.records, scraper.stats.errors, scraper.stats.not_found) == (1, 1, 1)
     assert scraper.stats.failed == ["PRJ0000041"]
+    assert scraper.stats.existing == ["PRJ0000011", "PRJ0000021"]
 
 
 def test_failure_after_replaced_marks_the_queried_id():
@@ -179,3 +180,30 @@ def test_worker_crash_marks_current_id_failed():
     scraper.run = boom
     scraper._run_guarded()
     assert scraper.stats.failed == ["PRJ0000021"]
+
+
+def test_replaced_query_counts_as_existing_once():
+    replaced = ErrorRecord(query_id="PRJ0000011", error_message="substituído", category=ErrorCategory.REPLACED)
+    scraper = _make_scraper([replaced, DocRecord(query_id="PRJ0000012")])
+    scraper._process_id(None, None, "PRJ0000011")
+    assert scraper.stats.existing == ["PRJ0000011"]
+
+
+def test_run_parallel_splits_query_ids_and_merges_stats(monkeypatch):
+    import src.doc_scraper.orchestrator as orchestrator
+
+    monkeypatch.setattr(orchestrator, "SpreadsheetWriter", lambda config: MagicMock())
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda seconds: None)
+    seen = []
+
+    def fake_run(self):
+        seen.append(list(self._id_range()))
+        self.stats.records += len(self._query_ids)
+        self.stats.existing.extend(self._query_ids)
+        return self.stats
+
+    monkeypatch.setattr(DocScraper, "run", fake_run)
+    ids = [f"PRJ{n:07d}" for n in (11, 21, 31)]
+    stats = DocScraper.run_parallel(num_workers=2, query_ids=ids, form_config=MagicMock())
+    assert sorted(seen) == [ids[:2], ids[2:]]
+    assert stats.records == 3 and sorted(stats.existing) == ids

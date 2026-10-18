@@ -109,7 +109,7 @@ DOC_ID_START=11 DOC_ID_END=51 DOC_OUTPUT_PATH=smoke.xlsx python main.py
 
 `scripts/monthly_scrape.py` is what the monthly Windows task runs (from renovacao-avcb-crm's `scripts/monthly_update.py`). It never re-scrapes everything:
 
-- extends the current and previous year's range upwards (`find_range` starting at the known `high`) and scrapes only `done_through + 1 .. high`; `done_through` stops before the first failed ID, so that slice is retried next month;
+- extends the current and previous year's range upwards (`find_range` starting at the known `high`) and scrapes only `done_through + 1 .. high`; `done_through` advances only to the last ID that exists (never past a failed one), so failed slices and not-found IDs at the top are retried next month; an ambiguous probe keeps the known `high`;
 - re-queries, by Doc Number, records expiring in the next `--revise-days` (default 60) into `doc_data_rev_YYYY_MM.xlsx`, writing REPLACED for the queried number too (`record_replaced=True`);
 - state lives in the JSON passed as `--state`, seeded from `year_ranges.json` when missing;
 - exit codes: 0 complete, 3 partial (some IDs exhausted retries), 2 config, 4 portal unreachable.

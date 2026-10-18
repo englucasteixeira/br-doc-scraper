@@ -96,22 +96,55 @@ def test_new_year_without_ids_returns_none():
     )
 
 
-def test_done_through_reaches_high_without_failures():
+def _ids(*tails, prefix="PRJ2026"):
+    return [f"{prefix}{tail:07d}" for tail in tails]
+
+
+def test_done_through_reaches_last_existing_id():
     year = YearState(low=11, high=5001, done_through=2001)
-    assert advance_done_through(year, [], "PRJ2026").done_through == 5001
+    stats = RunStats(existing=_ids(2011, 4991, 5001))
+    assert advance_done_through(year, stats, "PRJ2026").done_through == 5001
+
+
+def test_not_found_at_the_top_stays_pending():
+    """A `high` past the real end (or numbers not issued yet) is queried again next month."""
+    year = YearState(low=11, high=5001, done_through=2001)
+    stats = RunStats(existing=_ids(2011, 3001), not_found=200)
+    assert advance_done_through(year, stats, "PRJ2026").done_through == 3001
 
 
 def test_done_through_stops_before_first_failure_of_the_year():
     year = YearState(low=11, high=5001, done_through=2001)
-    failed = ["PRJ20260004001", "PRJ20260003001", "PRJ20250000011"]
-    assert advance_done_through(year, failed, "PRJ2026").done_through == 3000
+    stats = RunStats(
+        failed=_ids(4001, 3001) + _ids(11, prefix="PRJ2025"),
+        existing=_ids(2501, 2991, 3011, 4501),
+    )
+    assert advance_done_through(year, stats, "PRJ2026").done_through == 2991
 
 
 def test_done_through_never_goes_back():
     year = YearState(low=11, high=5001, done_through=2001)
-    assert (
-        advance_done_through(year, ["PRJ20260000011"], "PRJ2026").done_through == 2001
-    )
+    stats = RunStats(failed=_ids(11), existing=_ids(1001))
+    assert advance_done_through(year, stats, "PRJ2026").done_through == 2001
+
+
+def test_ambiguous_probe_keeps_known_range():
+    current = YearState(low=31, high=2001, done_through=2001)
+
+    def flaky(tail):
+        return None if tail > 2001 else tail % 10 == 1
+
+    assert extend_year(flaky, current, max_tail=1_000_000, gap_tolerance=2) == current
+
+
+def test_ambiguous_probe_on_new_year_discovers_nothing():
+    assert extend_year(lambda tail: None, None, max_tail=1_000, gap_tolerance=2) is None
+
+
+def test_later_revision_outside_window_drops_document(tmp_path):
+    _write_workbook(tmp_path / "doc_data_2024.xlsx", [("PRJ20240000011", "20/11/2026")])
+    _write_workbook(tmp_path / "doc_data_rev_2026_10.xlsx", [("PRJ20240000011", "20/11/2031")])
+    assert select_revisions(tmp_path, date(2026, 10, 18), 60) == []
 
 
 def test_select_revisions_window_order_limit_and_settled(tmp_path):
