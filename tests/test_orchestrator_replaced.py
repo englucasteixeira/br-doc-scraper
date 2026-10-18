@@ -5,7 +5,7 @@ import pytest
 
 from src.doc_scraper.errors import ErrorCategory
 from src.doc_scraper.models import DocRecord, ErrorRecord
-from src.doc_scraper.orchestrator import DocScraper, REPLACED_MAX_RETRIES
+from src.doc_scraper.orchestrator import DocScraper, REPLACED_MAX_RETRIES, RunStats
 
 
 @dataclass
@@ -20,9 +20,13 @@ class _RateCfg:
     inter_id_delay_max: float = 0.0
 
 
-def _make_scraper(scripted_results):
+def _make_scraper(scripted_results, record_replaced=False):
     scraper = DocScraper.__new__(DocScraper)
     scraper._config = _ScraperCfg()
+    scraper._record_replaced = record_replaced
+    scraper._query_ids = None
+    scraper._current_id = None
+    scraper.stats = RunStats()
     scraper._rate_config = _RateCfg()
     scraper._writer = MagicMock()
     scraper._submitter = MagicMock()
@@ -129,3 +133,49 @@ def test_scrape_one_returns_none_writes_nothing():
     scraper._process_id(None, None, "PRJ0000011")
     scraper._writer.append.assert_not_called()
     scraper._writer.append_error.assert_not_called()
+
+
+def test_stats_count_each_outcome():
+    rec = DocRecord(query_id="PRJ0000011")
+    expired = ErrorRecord(query_id="PRJ0000021", error_message="vencido", category=ErrorCategory.EXPIRED)
+    missing = ErrorRecord(query_id="PRJ0000031", error_message="(800501)", category=ErrorCategory.NOT_FOUND_800501)
+    scraper = _make_scraper([rec, expired, missing, None])
+    for qid in ("PRJ0000011", "PRJ0000021", "PRJ0000031", "PRJ0000041"):
+        scraper._process_id(None, None, qid)
+    assert (scraper.stats.records, scraper.stats.errors, scraper.stats.not_found) == (1, 1, 1)
+    assert scraper.stats.failed == ["PRJ0000041"]
+
+
+def test_failure_after_replaced_marks_the_queried_id():
+    replaced = ErrorRecord(query_id="PRJ0000011", error_message="substituído", category=ErrorCategory.REPLACED)
+    scraper = _make_scraper([replaced, None])
+    scraper._process_id(None, None, "PRJ0000011")
+    assert scraper.stats.failed == ["PRJ0000011"]
+
+
+def test_record_replaced_writes_original_then_follows_tail():
+    replaced = ErrorRecord(query_id="PRJ0000011", error_message="substituído", category=ErrorCategory.REPLACED)
+    found = DocRecord(query_id="PRJ0000012")
+    scraper = _make_scraper([replaced, found], record_replaced=True)
+    scraper._process_id(None, None, "PRJ0000011")
+    scraper._writer.append_error.assert_called_once_with(replaced)
+    scraper._writer.append.assert_called_once_with(found)
+
+
+def test_explicit_query_ids_replace_the_range():
+    scraper = _make_scraper([])
+    scraper._query_ids = ["PRJ20250000012", "PRJ20240000031"]
+    assert list(scraper._id_range()) == ["PRJ20250000012", "PRJ20240000031"]
+
+
+def test_worker_crash_marks_current_id_failed():
+    scraper = _make_scraper([])
+    scraper._query_ids = ["PRJ0000011", "PRJ0000021"]
+
+    def boom():
+        scraper._current_id = "PRJ0000021"
+        raise RuntimeError("browser died")
+
+    scraper.run = boom
+    scraper._run_guarded()
+    assert scraper.stats.failed == ["PRJ0000021"]
