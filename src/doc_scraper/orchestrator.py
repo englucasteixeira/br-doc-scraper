@@ -24,12 +24,14 @@ logger = logging.getLogger(__name__)
 class RunStats:
     """Outcome counts of a run. `failed` holds query IDs that exhausted every attempt;
     `existing` holds query IDs known to exist (answered with a record or an error other
-    than not-found, or already in the output and skipped)."""
+    than not-found, or already in the output and skipped); `pending` holds, per worker
+    stopped by the time budget, the first ID it did not get to."""
     records: int = 0
     errors: int = 0
     not_found: int = 0
     failed: list[str] = field(default_factory=list)
     existing: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
 
     @property
     def answered(self) -> int:
@@ -41,6 +43,7 @@ class RunStats:
         self.not_found += other.not_found
         self.failed.extend(other.failed)
         self.existing.extend(other.existing)
+        self.pending.extend(other.pending)
 
 
 class DocScraper:
@@ -60,11 +63,14 @@ class DocScraper:
         _shared_writer: Optional[SpreadsheetWriter] = None,
         query_ids: Optional[Sequence[str]] = None,
         record_replaced: bool = False,
+        stop_at: Optional[float] = None,
     ) -> None:
         """`query_ids` replaces the id_start..id_end range with an explicit list.
         `record_replaced` also writes REPLACED for the queried ID before following the
-        tail (used when re-checking known documents)."""
+        tail (used when re-checking known documents). `stop_at` (a `time.time()` value)
+        is the time budget: past it no new ID is started; the ID in progress finishes."""
         self._config = scraper_config
+        self._stop_at = stop_at
         self._query_ids = list(query_ids) if query_ids is not None else None
         self._record_replaced = record_replaced
         self._current_id: Optional[str] = None
@@ -86,6 +92,10 @@ class DocScraper:
                 if query_id in already_scraped:
                     self.stats.existing.append(query_id)
                     continue
+                if self._stop_at is not None and time.time() >= self._stop_at:
+                    logger.info("Time budget reached; stopping before %s.", query_id)
+                    self.stats.pending.append(query_id)
+                    break
                 self._current_id = query_id
                 self._process_id(browser, solver, query_id)
         self._current_id = None
@@ -104,6 +114,7 @@ class DocScraper:
         form_config: FormConfig = FormConfig(),
         query_ids: Optional[Sequence[str]] = None,
         record_replaced: bool = False,
+        stop_at: Optional[float] = None,
     ) -> RunStats:
         """Split the range (or `query_ids`) among workers and return the merged stats."""
         logger.info("Starting parallel scraping with %d workers.", num_workers)
@@ -117,6 +128,7 @@ class DocScraper:
             form_config=form_config,
             _shared_writer=shared_writer,
             record_replaced=record_replaced,
+            stop_at=stop_at,
         )
         workers: list[DocScraper] = []
         if query_ids is not None:
@@ -153,8 +165,9 @@ class DocScraper:
         for worker in workers:
             stats.merge(worker.stats)
         logger.info(
-            "Parallel scraping complete: %d records, %d errors, %d not found, %d failed.",
-            stats.records, stats.errors, stats.not_found, len(stats.failed),
+            "Parallel scraping complete: %d records, %d errors, %d not found, %d failed, "
+            "%d workers stopped by the time budget.",
+            stats.records, stats.errors, stats.not_found, len(stats.failed), len(stats.pending),
         )
         return stats
 

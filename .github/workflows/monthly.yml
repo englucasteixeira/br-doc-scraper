@@ -1,0 +1,167 @@
+name: monthly
+
+# Monthly incremental scrape for renovacao-avcb-crm, in time-boxed, resumable runs.
+# Dispatched once a day by renovacao-avcb-crm's monthly-update workflow until the
+# month's scrape is complete; that workflow then builds and publishes the base.
+#
+# Data never lands in this public repository: the spreadsheets (full CPF) and
+# scrape_state.json travel as one encrypted bundle in a private Supabase bucket.
+#   pipeline/scrape.tar.gz.enc   raw/*.xlsx + scrape_state.json, AES-256 (openssl)
+#   pipeline/scrape-status.json  plain: {"month", "started", "exit_code", "finished_at"}
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: monthly-scrape
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BUCKET: pipeline
+  BUNDLE: scrape.tar.gz.enc
+  STATUS: scrape-status.json
+  # Minutes of scraping per run; leaves room for setup and upload in the 6-hour job.
+  TIME_BUDGET: "300"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+      DOC_TARGET_URL: ${{ secrets.DOC_TARGET_URL }}
+      DOC_ID_ZERO_PADDING: ${{ vars.DOC_ID_ZERO_PADDING || '7' }}
+      DOC_ID_FIELD_SELECTOR: ${{ secrets.DOC_ID_FIELD_SELECTOR }}
+      DOC_CAPTCHA_FIELD_SELECTOR: ${{ secrets.DOC_CAPTCHA_FIELD_SELECTOR }}
+      DOC_SUBMIT_BUTTON_SELECTOR: ${{ secrets.DOC_SUBMIT_BUTTON_SELECTOR }}
+      DOC_CAPTCHA_IMG_XPATH: ${{ secrets.DOC_CAPTCHA_IMG_XPATH }}
+      DOC_CAPTCHA_WRONG_MARKER: ${{ secrets.DOC_CAPTCHA_WRONG_MARKER }}
+      DOC_CAPTCHA_ERROR_CLASS: ${{ secrets.DOC_CAPTCHA_ERROR_CLASS }}
+      DOC_RED_MESSAGE_SELECTOR: ${{ secrets.DOC_RED_MESSAGE_SELECTOR }}
+      DOC_PDF_URL_MARKER: ${{ secrets.DOC_PDF_URL_MARKER }}
+      DOC_ERROR_EXPIRED_MARKER: ${{ secrets.DOC_ERROR_EXPIRED_MARKER }}
+      DOC_ERROR_REPLACED_MARKER: ${{ secrets.DOC_ERROR_REPLACED_MARKER }}
+      DOC_ERROR_NOT_FOUND_MARKER: ${{ secrets.DOC_ERROR_NOT_FOUND_MARKER }}
+      DOC_ERROR_INVALID_MARKER: ${{ secrets.DOC_ERROR_INVALID_MARKER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Storage helpers
+        run: |
+          cat > "$RUNNER_TEMP/storage.sh" <<'SH'
+          set -euo pipefail
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY DATA_PASSPHRASE; do
+            if [ -z "${!name:-}" ]; then echo "::error::secret $name is not set"; exit 2; fi
+          done
+          base="${SUPABASE_URL%/}/storage/v1/object/$BUCKET"
+          auth=(-H "apikey: $SUPABASE_SERVICE_ROLE_KEY")
+          # Legacy JWT keys also go in Authorization; new sb_secret_ keys only in apikey.
+          case "$SUPABASE_SERVICE_ROLE_KEY" in
+            eyJ*) auth+=(-H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY") ;;
+          esac
+          # get NAME FILE -> 0 downloaded, 1 missing; other errors abort.
+          get() {
+            local code
+            code=$(curl -sS -o "$2" -w '%{http_code}' "${auth[@]}" "$base/$1")
+            case "$code" in
+              200) return 0 ;;
+              400|404) rm -f "$2"; return 1 ;;
+              *) echo "::error::download of $1 failed with HTTP $code"; exit 1 ;;
+            esac
+          }
+          put() {
+            curl -sS --fail-with-body "${auth[@]}" -H "x-upsert: true" \
+              -H "Content-Type: $3" --data-binary "@$2" "$base/$1" > /dev/null
+          }
+          crypt() {  # crypt -e|-d IN OUT
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt "$1" \
+              -pass env:DATA_PASSPHRASE -in "$2" -out "$3"
+          }
+          SH
+
+      - name: Download data and decide
+        id: plan
+        run: |
+          source "$RUNNER_TEMP/storage.sh"
+          month=$(TZ=America/Sao_Paulo date +%Y-%m)
+          today=$(TZ=America/Sao_Paulo date +%F)
+          started="$today"
+          if get "$STATUS" status.json; then
+            cat status.json
+            if [ "$(jq -r .month status.json)" = "$month" ]; then
+              started=$(jq -r .started status.json)
+              case "$(jq -r .exit_code status.json)" in
+                0|3) echo "Scrape for $month is already complete."; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              esac
+            fi
+          fi
+          if ! get "$BUNDLE" bundle.enc; then
+            echo "::error::$BUCKET/$BUNDLE not found; seed it with 'python scripts/cloud_data.py push' in renovacao-avcb-crm"
+            exit 1
+          fi
+          mkdir -p work
+          crypt -d bundle.enc bundle.tar.gz
+          tar -xzf bundle.tar.gz -C work
+          rm bundle.enc bundle.tar.gz
+          ls -la work work/raw
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "month=$month" >> "$GITHUB_OUTPUT"
+          echo "started=$started" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.plan.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        if: steps.plan.outputs.run == 'true'
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Scrape
+        id: scrape
+        if: steps.plan.outputs.run == 'true'
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set +e
+          python scripts/monthly_scrape.py \
+            --output-dir work/raw --state work/scrape_state.json \
+            --today "${{ steps.plan.outputs.started }}" --time-budget "$TIME_BUDGET"
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload data and status
+        if: always() && steps.plan.outputs.run == 'true' && steps.scrape.outputs.code != ''
+        env:
+          CODE: ${{ steps.scrape.outputs.code }}
+          MONTH: ${{ steps.plan.outputs.month }}
+          STARTED: ${{ steps.plan.outputs.started }}
+        run: |
+          source "$RUNNER_TEMP/storage.sh"
+          tar -czf bundle.tar.gz -C work raw scrape_state.json
+          crypt -e bundle.tar.gz bundle.enc
+          put "$BUNDLE" bundle.enc application/octet-stream
+          jq -n --arg month "$MONTH" --arg started "$STARTED" --argjson code "$CODE" \
+            --arg at "$(date -u +%FT%TZ)" \
+            '{month: $month, started: $started, exit_code: $code, finished_at: $at}' > status.json
+          put "$STATUS" status.json application/json
+          cat status.json
+
+      - name: Result
+        if: steps.plan.outputs.run == 'true'
+        env:
+          CODE: ${{ steps.scrape.outputs.code }}
+        run: |
+          case "$CODE" in
+            0) echo "Scrape complete." ;;
+            3) echo "::warning::Partial scrape: failed IDs are retried next month." ;;
+            5) echo "Time budget reached; tomorrow's run resumes." ;;
+            4) echo "::error::Portal unreachable or blocked (exit 4); retried tomorrow."; exit 1 ;;
+            *) echo "::error::monthly_scrape exited with $CODE."; exit 1 ;;
+          esac

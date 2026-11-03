@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.monthly_scrape import (
     EXIT_OK,
     EXIT_PARTIAL,
+    EXIT_TIME_BUDGET,
     EXIT_UNREACHABLE,
     YearState,
     advance_done_through,
@@ -122,6 +123,13 @@ def test_done_through_stops_before_first_failure_of_the_year():
     assert advance_done_through(year, stats, "PRJ2026").done_through == 2991
 
 
+def test_done_through_stops_before_ids_left_by_the_time_budget():
+    """Each stopped worker leaves its next ID pending; nothing past the lowest one counts."""
+    year = YearState(low=11, high=5001, done_through=2001)
+    stats = RunStats(pending=_ids(2601, 4801), existing=_ids(2501, 3511, 4791))
+    assert advance_done_through(year, stats, "PRJ2026").done_through == 2501
+
+
 def test_done_through_never_goes_back():
     year = YearState(low=11, high=5001, done_through=2001)
     stats = RunStats(failed=_ids(11), existing=_ids(1001))
@@ -184,6 +192,10 @@ def test_exit_codes():
     assert exit_code(RunStats(failed=["X", "Y"]), health_ok=True) == EXIT_UNREACHABLE
     assert exit_code(RunStats(), health_ok=False) == EXIT_UNREACHABLE
     assert exit_code(RunStats(), health_ok=True) == EXIT_OK
+    assert exit_code(RunStats(records=3, pending=["X"]), health_ok=True) == EXIT_TIME_BUDGET
+    assert (
+        exit_code(RunStats(failed=["Y"], pending=["X"]), health_ok=True) == EXIT_TIME_BUDGET
+    )
 
 
 def test_health_check_probes_low_of_latest_year():

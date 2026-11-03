@@ -112,12 +112,17 @@ DOC_ID_START=11 DOC_ID_END=51 DOC_OUTPUT_PATH=smoke.xlsx python main.py
 - extends the current and previous year's range upwards (`find_range` starting at the known `high`) and scrapes only `done_through + 1 .. high`; `done_through` advances only to the last ID that exists (never past a failed one), so failed slices and not-found IDs at the top are retried next month; an ambiguous probe keeps the known `high`;
 - re-queries, by Doc Number, records expiring in the next `--revise-days` (default 60) into `doc_data_rev_YYYY_MM.xlsx`, writing REPLACED for the queried number too (`record_replaced=True`);
 - state lives in the JSON passed as `--state`, seeded from `year_ranges.json` when missing;
-- exit codes: 0 complete, 3 partial (some IDs exhausted retries), 2 config, 4 portal unreachable.
+- `--time-budget MINUTES` stops starting new IDs after that long (the ID in progress finishes); each stopped worker leaves its next ID in `RunStats.pending`, `done_through` never passes it, and the run exits 5 so the caller runs again later (spreadsheet rows already written are skipped on resume);
+- exit codes: 0 complete, 3 partial (some IDs exhausted retries), 2 config, 4 portal unreachable, 5 time budget reached.
 
 ```bash
 .venv/Scripts/python scripts/monthly_scrape.py --output-dir <raw dir> --state <state.json> [--max-revisions N]
 ```
 
 ## CI
+
+`.github/workflows/monthly.yml` is the cloud version of the monthly run. renovacao-avcb-crm's `monthly-update` workflow dispatches it once a day until the month is complete. Each run downloads `pipeline/scrape.tar.gz.enc` (raw spreadsheets + `scrape_state.json`, AES-256 with `DATA_PASSPHRASE`) from a private Supabase bucket, runs `monthly_scrape.py --time-budget 300`, uploads the bundle back and writes the plain `pipeline/scrape-status.json` (`month`, `started`, `exit_code`). It never uploads GitHub artifacts: this repository is public and the spreadsheets hold full CPF. Extra secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DATA_PASSPHRASE`.
+
+**Warning:** artifacts of a public repository can be downloaded by any GitHub user. The `scrape.yml` workflow below uploads raw spreadsheets as artifacts, so only run it if you delete the run right after downloading the result.
 
 `.github/workflows/scrape.yml` runs a sharded matrix (`max-parallel: 2`, 60 shards) with resume-skip via `SpreadsheetWriter.already_scraped_ids()`. Portal-specific config is injected through GitHub repository Secrets (same keys as `secrets_local.example.py`).
