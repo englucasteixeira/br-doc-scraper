@@ -32,6 +32,7 @@ def _make_scraper(scripted_results, record_replaced=False):
     scraper._submitter = MagicMock()
     scraper._browser_config = None
     scraper._captcha_config = None
+    scraper._stop_at = None
 
     results_iter = iter(scripted_results)
 
@@ -207,3 +208,42 @@ def test_run_parallel_splits_query_ids_and_merges_stats(monkeypatch):
     stats = DocScraper.run_parallel(num_workers=2, query_ids=ids, form_config=MagicMock())
     assert sorted(seen) == [ids[:2], ids[2:]]
     assert stats.records == 3 and sorted(stats.existing) == ids
+
+
+def test_merge_keeps_pending_ids():
+    total = RunStats()
+    total.merge(RunStats(records=1, pending=["PRJ0000021"]))
+    total.merge(RunStats(pending=["PRJ0000051"]))
+    assert total.pending == ["PRJ0000021", "PRJ0000051"]
+
+
+def _run_with_budget(monkeypatch, stop_at, clock):
+    """Runs `run()` over IDs 11..51 with a fake browser and a scripted clock."""
+    import src.doc_scraper.orchestrator as orchestrator
+
+    scraper = _make_scraper([DocRecord(query_id=f"PRJ{n:07d}") for n in (11, 21, 31, 41, 51)])
+    scraper._query_ids = [f"PRJ{n:07d}" for n in (11, 21, 31, 41, 51)]
+    scraper._stop_at = stop_at
+    scraper._writer.already_scraped_ids.return_value = {"PRJ0000011"}
+    browser = MagicMock()
+    browser.__enter__.return_value = browser
+    monkeypatch.setattr(orchestrator, "BrowserManager", lambda _cfg: browser)
+    monkeypatch.setattr(orchestrator, "CaptchaSolver", lambda _cfg: None)
+    monkeypatch.setattr(orchestrator.time, "time", lambda: next(clock))
+    processed = []
+    scraper._process_id = lambda _b, _s, qid: processed.append(qid)
+    return scraper, scraper.run(), processed
+
+
+def test_time_budget_stops_before_the_next_id(monkeypatch):
+    clock = iter([100.0, 100.0, 200.0])
+    scraper, stats, processed = _run_with_budget(monkeypatch, stop_at=150.0, clock=clock)
+    assert processed == ["PRJ0000021", "PRJ0000031"]
+    assert stats.pending == ["PRJ0000041"]
+    assert stats.existing == ["PRJ0000011"]
+
+
+def test_without_budget_every_id_runs(monkeypatch):
+    scraper, stats, processed = _run_with_budget(monkeypatch, stop_at=None, clock=iter([]))
+    assert processed == ["PRJ0000021", "PRJ0000031", "PRJ0000041", "PRJ0000051"]
+    assert stats.pending == []

@@ -17,7 +17,8 @@ A missing state file is seeded from --ranges with done_through = high (years
 already fully scraped).
 
 Exit codes: 0 complete; 3 partial (some IDs exhausted their attempts, retried
-next month); 2 configuration error; 4 portal unreachable or nothing answered.
+next month); 2 configuration error; 4 portal unreachable or nothing answered;
+5 the --time-budget ran out before the end (run again: it resumes where it stopped).
 
 Usage:
     python scripts/monthly_scrape.py --output-dir ../renovacao-avcb-crm/data/raw \\
@@ -31,6 +32,7 @@ import json
 import logging
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -73,6 +75,7 @@ EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_PARTIAL = 3
 EXIT_UNREACHABLE = 4
+EXIT_TIME_BUDGET = 5
 
 # Error categories that already settle a document; it is not re-checked again.
 SETTLED_CATEGORIES = {"EXPIRED", "REPLACED"}
@@ -166,7 +169,8 @@ def _extend_year(
 
 
 def advance_done_through(year: YearState, stats: RunStats, prefix: str) -> YearState:
-    """`done_through` moves to the last ID known to exist, and never past a failed ID.
+    """`done_through` moves to the last ID known to exist, and never past a failed ID
+    nor past an ID a worker left pending when the time budget ran out.
 
     Not-found IDs above the last existing one stay pending, so numbers issued later (or
     a `high` that overshot the real end) are queried again next month."""
@@ -174,7 +178,7 @@ def advance_done_through(year: YearState, stats: RunStats, prefix: str) -> YearS
     def tails(ids: list[str]) -> list[int]:
         return [int(qid[len(prefix) :]) for qid in ids if qid.startswith(prefix)]
 
-    limit = min(tails(stats.failed), default=year.high + 1) - 1
+    limit = min(tails(stats.failed + stats.pending), default=year.high + 1) - 1
     existing = [tail for tail in tails(stats.existing) if tail <= limit]
     done = max(existing, default=year.done_through)
     return replace(year, done_through=max(year.done_through, done))
@@ -251,6 +255,8 @@ def group_by_prefix(doc_numbers: list[str]) -> dict[str, list[str]]:
 def exit_code(stats: RunStats, health_ok: bool) -> int:
     if not health_ok:
         return EXIT_UNREACHABLE
+    if stats.pending:
+        return EXIT_TIME_BUDGET
     if stats.failed and stats.answered == 0:
         return EXIT_UNREACHABLE
     return EXIT_PARTIAL if stats.failed else EXIT_OK
@@ -289,6 +295,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Keep the ranges in --state as they are (rehearsals, or redoing a month).",
     )
     parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=None,
+        metavar="MINUTES",
+        help="Stop starting new IDs after this many minutes (exit 5; run again to resume).",
+    )
+    parser.add_argument(
         "--today", type=date.fromisoformat, default=None, help=argparse.SUPPRESS
     )
     args = parser.parse_args(argv)
@@ -302,6 +315,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ],
     )
     today = args.today or date.today()
+    stop_at = time.time() + args.time_budget * 60 if args.time_budget is not None else None
 
     base_scraper = ScraperConfig()
     captcha_config = CaptchaConfig()
@@ -378,6 +392,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             storage_config=StorageConfig(
                 output_path=str(args.output_dir / f"doc_data_{year}.xlsx")
             ),
+            stop_at=stop_at,
             **common,
         )
         total.merge(stats)
@@ -404,6 +419,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             storage_config=revision_storage,
             query_ids=ids,
             record_replaced=True,
+            stop_at=stop_at,
             **common,
         )
         total.merge(stats)
@@ -417,6 +433,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         len(total.failed),
         code,
     )
+    if total.pending:
+        logger.info("Time budget reached; run again to resume (exit %d).", code)
     if total.failed:
         logger.warning("Failed IDs (first 20): %s", ", ".join(total.failed[:20]))
     return code
