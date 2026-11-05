@@ -1,8 +1,10 @@
 name: monthly
 
 # Monthly incremental scrape for renovacao-avcb-crm, in time-boxed, resumable runs.
-# Dispatched once a day by renovacao-avcb-crm's monthly-update workflow until the
-# month's scrape is complete; that workflow then builds and publishes the base.
+# Dispatched by renovacao-avcb-crm's monthly-update workflow (every 6 hours) until the
+# month's scrape is complete; that workflow then builds and publishes the base. A run
+# that stops at the time budget (exit 5) dispatches the next one itself, so the scrape
+# does not wait for a schedule GitHub may delay or drop; the schedule is the fallback.
 #
 # Data never lands in this public repository: the spreadsheets (full CPF) and
 # scrape_state.json travel as one encrypted bundle in a private Supabase bucket.
@@ -17,6 +19,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # only to dispatch the next run of this workflow
 
 env:
   BUCKET: pipeline
@@ -152,6 +155,15 @@ jobs:
             '{month: $month, started: $started, exit_code: $code, finished_at: $at}' > status.json
           put "$STATUS" status.json application/json
           cat status.json
+
+      # A dispatch made with GITHUB_TOKEN does start a new run (workflow_dispatch is an
+      # exception to the no-recursion rule). Only exit 5 chains: a failure (exit 4, portal
+      # down) waits for the next scheduled dispatch instead of retrying in a loop.
+      - name: Chain the next run
+        if: steps.scrape.outputs.code == '5'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monthly.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
 
       - name: Result
         if: steps.plan.outputs.run == 'true'

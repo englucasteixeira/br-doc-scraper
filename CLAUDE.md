@@ -121,7 +121,7 @@ DOC_ID_START=11 DOC_ID_END=51 DOC_OUTPUT_PATH=smoke.xlsx python main.py
 
 ## CI
 
-`.github/workflows/monthly.yml` is the cloud version of the monthly run. renovacao-avcb-crm's `monthly-update` workflow dispatches it once a day until the month is complete. Each run downloads `pipeline/scrape.tar.gz.enc` (raw spreadsheets + `scrape_state.json`, AES-256 with `DATA_PASSPHRASE`) from a private Supabase bucket, runs `monthly_scrape.py --time-budget 300`, uploads the bundle back and writes the plain `pipeline/scrape-status.json` (`month`, `started`, `exit_code`). It never uploads GitHub artifacts: this repository is public and the spreadsheets hold full CPF. Extra secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DATA_PASSPHRASE`.
+`.github/workflows/monthly.yml` is the cloud version of the monthly run. renovacao-avcb-crm's `monthly-update` workflow dispatches it every 6 hours until the month is complete, and a run that stops at the time budget (exit 5) dispatches the next one itself, so the scrape runs almost continuously. Each run downloads `pipeline/scrape.tar.gz.enc` (raw spreadsheets + `scrape_state.json`, AES-256 with `DATA_PASSPHRASE`) from a private Supabase bucket, runs `monthly_scrape.py --time-budget 300`, uploads the bundle back and writes the plain `pipeline/scrape-status.json` (`month`, `started`, `exit_code`). It never uploads GitHub artifacts: this repository is public and the spreadsheets hold full CPF. Extra secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DATA_PASSPHRASE`.
 
 **Warning:** artifacts of a public repository can be downloaded by any GitHub user. The `scrape.yml` workflow below uploads raw spreadsheets as artifacts, so only run it if you delete the run right after downloading the result.
 
